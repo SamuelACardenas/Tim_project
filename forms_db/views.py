@@ -4,6 +4,7 @@ import xlwt
 import xlsxwriter
 import plotly.express as px
 import plotly.graph_objects as go
+import json
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
@@ -13,6 +14,7 @@ from io import BytesIO
 from forms_db.module import WriteToExcel
 from datetime import date, datetime, timedelta, time
 from django.views.decorators.http import require_GET
+from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction, models
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
@@ -27,6 +29,7 @@ from django.core.paginator import Paginator
 from .forms import EmployeesForm, UutForm, FailureForm, BoomForm, RejectedForm, ErrorMessageForm, StationForm, MaintenanceForm, SpareForm, ReleaseForm, CorrectiveMaintenanceForm, ManualFailureRegistrationForm
 from .models import Uut, Employes, Failures, Station, ErrorMessages, Booms, Rejected, Release, Maintenance, SparePart, TestHistory  
 from django.views.decorators.csrf import csrf_exempt
+
 
 @login_required(login_url='login')
 def home(request):
@@ -2542,3 +2545,149 @@ def get_color_for_category(category):
         'Desconocida': 'gray'
     }
     return color_map.get(category, 'gray')
+
+
+@csrf_exempt
+def api_login(request):
+    """
+    API para autenticación desde la aplicación gráfica
+    """
+    if request.method == 'POST':
+        try:
+            # Parse JSON data
+            data = json.loads(request.body)
+            username = data.get('username', '').strip()
+            password = data.get('password', '')
+            
+            if not username or not password:
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Username and password are required'
+                }, status=400)
+            
+            # Autenticar usuario
+            user = authenticate(username=username, password=password)
+            
+            if user is not None and user.is_active:
+                # Verificar si es empleado
+                try:
+                    empleado = Employes.objects.get(employeeNumber=user)
+                    
+                    # Datos de respuesta
+                    user_data = {
+                        'id': user.id,
+                        'username': user.username,
+                        'email': user.email,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name,
+                        'is_staff': user.is_staff,
+                        'is_superuser': user.is_superuser,
+                        'employee_data': {
+                            'employee_number': empleado.employeeNumber_id,
+                            'employee_name': empleado.employeeName,
+                            'privileges': empleado.privileges,
+                            'mail': empleado.mail,
+                            'pmd': empleado.pmd,
+                            'dell': empleado.dell,
+                            'switch': empleado.switch,
+                            'sony': empleado.sony,
+                            'rowmm': empleado.RowMM,
+                            'qa': empleado.QA
+                        }
+                    }
+                    
+                    # Registrar login exitoso
+                    empleado.last_login = timezone.now()
+                    empleado.save()
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'message': 'Login successful',
+                        'user': user_data,
+                        'timestamp': timezone.now().isoformat()
+                    })
+                    
+                except Employes.DoesNotExist:
+                    return JsonResponse({
+                        'success': False,
+                        'error': 'User is not registered as employee'
+                    }, status=403)
+                    
+            else:
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Invalid credentials or inactive account'
+                }, status=401)
+                
+        except json.JSONDecodeError:
+            return JsonResponse({
+                'success': False,
+                'error': 'Invalid JSON data'
+            }, status=400)
+            
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'error': f'Server error: {str(e)}'
+            }, status=500)
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Method not allowed'
+    }, status=405)
+
+@csrf_exempt
+def api_logout(request):
+    """
+    API para logout (opcional)
+    """
+    if request.method == 'POST':
+        return JsonResponse({
+            'success': True,
+            'message': 'Logout successful'
+        })
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Method not allowed'
+    }, status=405)
+
+@csrf_exempt
+def api_check_session(request):
+    """
+    API para verificar sesión activa
+    """
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body)
+            username = data.get('username', '').strip()
+            
+            try:
+                user = User.objects.get(username=username)
+                empleado = Employes.objects.get(employeeNumber=user)
+                
+                return JsonResponse({
+                    'success': True,
+                    'user': {
+                        'username': user.username,
+                        'employee_name': empleado.employeeName,
+                        'privileges': empleado.privileges
+                    }
+                })
+                
+            except (User.DoesNotExist, Employes.DoesNotExist):
+                return JsonResponse({
+                    'success': False,
+                    'error': 'User not found'
+                }, status=404)
+                
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'error': str(e)
+            }, status=500)
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Method not allowed'
+    }, status=405)
