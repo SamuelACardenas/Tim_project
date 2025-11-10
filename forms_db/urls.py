@@ -35,5 +35,8 @@ urlpatterns = [
     path('manual-failure-registration/', views.manual_failure_registration, name='manual_failure_registration'),
     path('weekly-failure-report/', views.weekly_failure_report, name='weekly_failure_report'),
     path('yield-dashboard/', views.project_yield_dashboard, name='yield_dashboard'),
+    path('api/login/', views.api_login, name='api_login'),
+    path('api/logout/', views.api_logout, name='api_logout'),
+    path('api/check-session/', views.api_check_session, name='api_check_session'),
 
 ]
