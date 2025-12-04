@@ -20,6 +20,7 @@ import xml
 import time
 from datetime import datetime, timedelta
 from django.db.models import Q
+import socket
 
 class Command(BaseCommand):
     help = 'Actualiza logs de prueba desde estaciones remotas para proyecto TIM'
@@ -109,45 +110,80 @@ class Command(BaseCommand):
         is_pass = "PASS" in filename
         
         try:
-            # 1. Primero guardar copia local del archivo original
+            # ============================================================================
+            # CAMBIO COMIENZO: Primero guardar copia local SIEMPRE (GDL o NO-GDL)
+            # ============================================================================
+            # 1. Guardar copia local del archivo original (esto siempre se hace)
             log_info = self.save_local_copy(sftp, remote_path, filename, estacion_nombre)
             
-            # 2. Luego mover el archivo remoto
-            #try:
-            #    sftp.mkdir('C:/LOG/TIM/processed')
-            #except:
-            #    pass  # El directorio ya existe
-            
-            #sftp.rename(remote_path, remote_backup_path)
-            
-            # 3. Solo registrar en BD si es GDL
-            factory_value = str(log_info.get('factory') or '')  # Convierte None a '' seguro
-
-            # Prueba para usar operador_id para valor de GDL y no-GDL
-            # factory_value = self.determine_factory_from_operator(factory_value, log_info.get('operator_id'))
-
-            if not factory_value:
-                self.stdout.write(self.style.WARNING(
-                    f"Advertencia: 'factory' es None o vacío en {filename}"
+            # Verificar si tenemos un SN válido
+            if not log_info.get('sn'):
+                self.stdout.write(self.style.ERROR(
+                    f"No se pudo extraer SN del archivo {filename}. No se procesará."
                 ))
-
-            # Condicion para mandar el SN al metodo de conexion SOAP
-            if log_info.get('sn'):
-                resultado_test = 'PASS' if is_pass else 'FAIL'
-
-                # Llamada a la función de procesamiento de reglas
+                # No movemos el archivo, queda para procesar manualmente
+                return
+            # ============================================================================
+            # CAMBIO FIN: Primero guardar copia local SIEMPRE
+            # ============================================================================
+            
+            # ============================================================================
+            # CAMBIO COMIENZO: Lógica de consulta SOAP con manejo de errores de red
+            # ============================================================================
+            resultado_test = 'PASS' if is_pass else 'FAIL'
+            
+            try:
+                # Verificar si hay conectividad de red antes de intentar SOAP
+                if not self.check_network_connectivity():
+                    self.stdout.write(self.style.WARNING(
+                        f"Sin conectividad de red. No se consultará SOAP para {filename}. "
+                        f"El archivo NO será movido y se reintentará después."
+                    ))
+                    return  # Salir sin mover el archivo
+                
+                # Llamada a la función de procesamiento de reglas SOAP
                 resultado_reglas = self.procesar_test_completo(
                     serial_number=log_info['sn'],
                     resultado_test=resultado_test,
                     test_history_model=TestHistory
                 )
-
+                
                 factory_value = resultado_reglas['stage_final']
+                
+            except Exception as soap_error:
+                self.stdout.write(self.style.ERROR(
+                    f'Error grave en consulta SOAP para {filename}: {str(soap_error)}'
+                ))
+                self.stdout.write(self.style.WARNING(
+                    f'El archivo {filename} NO será movido. Se reintentará en la próxima ejecución.'
+                ))
+                return  # Salir sin mover el archivo
+            # ============================================================================
+            # CAMBIO FIN: Lógica de consulta SOAP con manejo de errores de red
+            # ============================================================================
 
+            # ============================================================================
+            # CAMBIO COMIENZO: Solo ahora mover el archivo después de procesamiento exitoso
+            # ============================================================================
+            try:
+                sftp.mkdir('C:/LOG/TIM/processed')
+            except:
+                pass  # El directorio ya existe
+            
+            # Mover el archivo remoto SOLO si todo fue exitoso
+            sftp.rename(remote_path, remote_backup_path)
+            
+            self.stdout.write(self.style.SUCCESS(
+                f'Archivo movido a processed: {filename}'
+            ))
+            # ============================================================================
+            # CAMBIO FIN: Solo ahora mover el archivo después de procesamiento exitoso
+            # ============================================================================
+
+            # ============================================================================
+            # CAMBIO COMIENZO: Registrar en BD solo si es GDL
+            # ============================================================================
             if factory_value.upper() == 'GDL':
-                if not log_info.get('sn'):
-                    raise ValueError("No se pudo extraer el número de serie del log")
-
                 uut = self.register_uut(log_info, is_pass)
                 test_history = self.register_test_history(uut, ip, estacion_nombre, log_info, is_pass)
                 
@@ -158,14 +194,20 @@ class Command(BaseCommand):
                     f"Procesado (GDL): {filename} | SN: {log_info['sn']} | {'PASS' if is_pass else 'FAIL'}"
                 ))
             else:
+                # NO-GDL: Solo copia local y mover archivo, no registro en BD
                 self.stdout.write(self.style.SUCCESS(
-                    f"Procesado (No-GDL): {filename} | SN: {log_info.get('sn', 'N/A')}"
+                    f"Procesado (NO-GDL): {filename} | SN: {log_info.get('sn', 'N/A')} | "
+                    f"Copia local guardada, archivo movido, NO registro en BD"
                 ))
+            # ============================================================================
+            # CAMBIO FIN: Registrar en BD solo si es GDL
+            # ============================================================================
                 
         except Exception as e:
             self.stdout.write(self.style.ERROR(
                 f'Error procesando archivo {filename}: {str(e)}'
             ))
+            # En caso de error, NO mover el archivo para reintentar después
             raise
 
 
@@ -236,7 +278,9 @@ class Command(BaseCommand):
             'log_datetime': None,
             'error_message': None,
             'station_id': None,
-            'factory': None,
+            # ============================================================================
+            # CAMBIO COMIENZO: Se elimina 'factory' ya que se determinará por SOAP
+            # ============================================================================
             'raw_content': ''
         }
         
@@ -259,7 +303,7 @@ class Command(BaseCommand):
                         info['sn'] = posible
                         break
 
-            # Fallback SN
+            # Fallback SN - Solo si no se encontró en el contenido
             if not info['sn']:
                 info['sn'] = self.extract_serial_from_filename(filename)
 
@@ -306,20 +350,14 @@ class Command(BaseCommand):
                 if not info['part_number'] and "Part Number:" in linea:
                     info['part_number'] = linea.split("Part Number:")[1].strip()[:12]
 
-            # Extraer factory
-            for linea in contenido_lineas:
-                linea = linea.strip()
-                if "Factory:" in linea:
-                    info['factory'] = linea.split("Factory:")[1].strip().upper()
-                    break
+            # ============================================================================
+            # CAMBIO COMIENZO: Se elimina la extracción de "factory" del log
+            # Ya no se busca "Factory:" en el contenido del archivo
+            # ============================================================================
 
-            if not info['factory']:
-                est = estacion_nombre.upper()
-
-                if "RUNIN" in est or "FCA" in est or "BFT" in est:
-                    info['factory'] = "GDL"
-                else:
-                    info['factory'] = "UNKNOWN"
+            # ============================================================================
+            # CAMBIO FIN: Se elimina la extracción de "factory" del log
+            # ============================================================================
 
             # Si es archivo FAIL, extraer mensaje de error estandarizado
             if "FAIL" in filename and not info['error_message']:
@@ -679,29 +717,36 @@ class Command(BaseCommand):
             raise ValueError(f'Error registrando Falla: {str(e)}')
         
 
-    # Configuración de logging (opcional)
-    # logging.basicConfig(level=logging.INFO)
-    # logging.getLogger('suds.client').setLevel(logging.DEBUG)
-    # logger = logging.getLogger(__name__)
-
-    def xmlpprint(self, xml):
-        """
-        Formatea un string XML para hacerlo más legible.
-        
-        Parámetros:
-        xml: string XML a formatear
-        
-        Retorna:
-        XML formateado con sangrías
-        """
-        return etree.tostring(etree.fromstring(xml), pretty_print=True)
-
+    # ============================================================================
+    # CAMBIO COMIENZO: Métodos SOAP modificados para adaptarse a esta clase
+    # Incluye manejo mejorado de errores y conectividad
+    # ============================================================================
+    
+    def check_network_connectivity(self):
+        """Verifica si hay conectividad de red antes de intentar consultar SOAP"""
+        try:
+            # Intentar hacer ping al servidor SOAP
+            socket.setdefaulttimeout(5)  # 5 segundos timeout
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.connect(("10.12.197.87", 9400))
+            test_socket.close()
+            self.stdout.write(self.style.SUCCESS("Conectividad de red verificada"))
+            return True
+        except (socket.timeout, socket.error, ConnectionRefusedError) as e:
+            self.stdout.write(self.style.ERROR(f"Sin conectividad de red: {str(e)}"))
+            return False
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"Error verificando conectividad: {str(e)}"))
+            return False
+    
     # Configuración del cliente SOAP
-    url = "http://10.12.197.87:9400/tst/pmdu/?wsdl"
-    client = Client(url, retxml=True)
-    d = dict(http='http://10.12.197.87:9400')
-    client.set_options(proxy=d)
-
+    def get_soap_client(self):
+        """Obtiene el cliente SOAP configurado"""
+        url = "http://10.12.197.87:9400/tst/pmdu/?wsdl"
+        client = Client(url, retxml=True, timeout=10)  # Timeout de 10 segundos
+        d = dict(http='http://10.12.197.87:9400')
+        client.set_options(proxy=d)
+        return client
 
     def call_current_stage(self, sysserial):
         """
@@ -716,27 +761,34 @@ class Command(BaseCommand):
         Retorna:
         Contenido entre <currentEvent> y </currentEvent> o None si no se encuentra
         """
-        print(f"Consultando stage para serial: {sysserial}")
-        result = self.client.service.current_stage(sysserial)
-        
-        # Convertir bytes a string
-        xml_str = result.decode('utf-8')
-        
-        # Extraer contenido entre <currentEvent> y </currentEvent>
-        start_tag = "<currentEvent>"
-        end_tag = "</currentEvent>"
-        
-        start_index = xml_str.find(start_tag)
-        end_index = xml_str.find(end_tag)
-        
-        if start_index != -1 and end_index != -1:
-            content = xml_str[start_index + len(start_tag):end_index]
-            print(f"Stage obtenido: {content}")
-            return content
-        
-        return None
+        self.stdout.write(f"Consultando SOAP para serial: {sysserial}")
+        try:
+            client = self.get_soap_client()
+            result = client.service.current_stage(sysserial)
+            
+            # Convertir bytes a string
+            xml_str = result.decode('utf-8')
+            
+            # Extraer contenido entre <currentEvent> y </currentEvent>
+            start_tag = "<currentEvent>"
+            end_tag = "</currentEvent>"
+            
+            start_index = xml_str.find(start_tag)
+            end_index = xml_str.find(end_tag)
+            
+            if start_index != -1 and end_index != -1:
+                content = xml_str[start_index + len(start_tag):end_index]
+                self.stdout.write(f"Stage obtenido del SOAP: {content}")
+                return content
+            else:
+                self.stdout.write(self.style.WARNING(f"No se encontró currentEvent en respuesta SOAP para {sysserial}"))
+                return None
+                
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f'Error en consulta SOAP para {sysserial}: {str(e)}'))
+            raise  # Relanzar para manejo superior
 
-    def verificar_historial_fallas_semana(self, serial_number, test_history_model):
+    def verificar_historial_fallas_semana(self, serial_number):
         """
         Verifica si es la primera falla del equipo en la semana actual.
         
@@ -745,7 +797,6 @@ class Command(BaseCommand):
         
         Parámetros:
         serial_number: Número de serie del equipo
-        test_history_model: Modelo Django TestHistory para consulta
         
         Retorna:
         True si es primera falla en la semana, False si ya falló antes
@@ -759,20 +810,26 @@ class Command(BaseCommand):
             # Ajustar a inicio del día
             inicio_semana = inicio_semana.replace(hour=0, minute=0, second=0, microsecond=0)
             
-            # Consultar base de datos
-            fallas_semana = test_history_model.objects.filter(
-                serial_number=serial_number,
-                resultado='FAIL',
-                fecha_test__gte=inicio_semana,
-                fecha_test__lt=hoy
-            ).count()
-            
-            print(f"Fallas encontradas para {serial_number} en la semana: {fallas_semana}")
-            
-            return fallas_semana == 0  # True si es primera falla
-            
+            # Consultar base de datos - MODIFICADO para usar el modelo correcto
+            # Buscar UUT con el serial_number y luego contar sus fallas
+            uut = Uut.objects.filter(sn=serial_number).first()
+            if uut:
+                fallas_semana = TestHistory.objects.filter(
+                    uut=uut,
+                    status=False,  # FAIL es False
+                    test_date__gte=inicio_semana,
+                    test_date__lt=hoy
+                ).count()
+                
+                self.stdout.write(f"Fallas encontradas para {serial_number} en la semana: {fallas_semana}")
+                return fallas_semana == 0  # True si es primera falla
+            else:
+                # Si no existe UUT, es primera falla
+                self.stdout.write(f"No existe UUT para {serial_number}, se considera primera falla")
+                return True
+                
         except Exception as e:
-            print(f"Error al verificar historial de fallas: {e}")
+            self.stdout.write(self.style.WARNING(f'Error al verificar historial de fallas para {serial_number}: {e}'))
             return True  # Por seguridad, asumir primera falla si hay error
 
     def procesar_test_completo(self, serial_number, resultado_test, test_history_model=None):
@@ -784,10 +841,9 @@ class Command(BaseCommand):
         2. Aplica reglas según resultado y flujo
         3. Verifica historial si es necesario
         4. Determina stage final
-        5. Registra en historial si es falla
         
         Parámetros:
-        serial_number: Número de serie del equipo (ej: 'GDL180065')
+        serial_number: Número de serie del equipo (ej: 'FCR1E59G81034')
         resultado_test: Resultado del test ('PASS' o 'FAIL')
         test_history_model: Modelo TestHistory (opcional)
         
@@ -801,10 +857,10 @@ class Command(BaseCommand):
         - FAIL + flujo no REPAIR → GDL
         """
         
-        print(f"\n{'='*60}")
-        print(f"INICIANDO PROCESAMIENTO PARA: {serial_number}")
-        print(f"Resultado test recibido: {resultado_test}")
-        print(f"{'='*60}")
+        self.stdout.write(f"\n{'='*60}")
+        self.stdout.write(f"INICIANDO PROCESAMIENTO SOAP PARA: {serial_number}")
+        self.stdout.write(f"Resultado test recibido: {resultado_test}")
+        self.stdout.write(f"{'='*60}")
         
         resultado_dict = {
             'serial': serial_number,
@@ -819,11 +875,12 @@ class Command(BaseCommand):
         flujo_actual = self.call_current_stage(serial_number)
         
         if flujo_actual is None:
-            print(f"ADVERTENCIA: No se pudo obtener flujo para {serial_number}")
-            flujo_actual = 'NO_DISPONIBLE'
+            # IMPORTANTE: Si SOAP no reconoce el SN, NO asumimos GDL automáticamente
+            # Levantamos una excepción para manejo superior
+            raise ValueError(f"El servicio SOAP no reconoce el serial number: {serial_number}")
         
         resultado_dict['flujo_obtenido'] = flujo_actual
-        print(f"Flujo obtenido del SOAP: '{flujo_actual}'")
+        self.stdout.write(f"Flujo obtenido del SOAP: '{flujo_actual}'")
         
         # Paso 2: Aplicar reglas de negocio
         resultado_upper = resultado_test.upper()
@@ -844,24 +901,16 @@ class Command(BaseCommand):
         elif resultado_upper == 'FAIL':
             if flujo_upper == 'REPAIR':
                 # FAIL con flujo REPAIR → verificar historial
-                if test_history_model:
-                    es_primera_falla = self.verificar_historial_fallas_semana(
-                        serial_number, 
-                        test_history_model
-                    )
-                    
-                    if es_primera_falla:
-                        # Primera falla en la semana → GDL
-                        stage_final = 'GDL'
-                        accion = "FAIL con flujo REPAIR (primera falla semana): manejar como GDL"
-                    else:
-                        # Falla repetida → NO-GDL
-                        stage_final = 'NO-GDL'
-                        accion = "FAIL con flujo REPAIR (falla repetida): manejar como NO-GDL"
-                else:
-                    # Sin modelo de historial → tratar como primera falla (GDL)
+                es_primera_falla = self.verificar_historial_fallas_semana(serial_number)
+                
+                if es_primera_falla:
+                    # Primera falla en la semana → GDL
                     stage_final = 'GDL'
-                    accion = "FAIL con flujo REPAIR (sin historial): manejar como GDL"
+                    accion = "FAIL con flujo REPAIR (primera falla semana): manejar como GDL"
+                else:
+                    # Falla repetida → NO-GDL
+                    stage_final = 'NO-GDL'
+                    accion = "FAIL con flujo REPAIR (falla repetida): manejar como NO-GDL"
             else:
                 # FAIL sin REPAIR → GDL
                 stage_final = 'GDL'
@@ -871,33 +920,24 @@ class Command(BaseCommand):
         else:
             stage_final = 'GDL'  # Valor por defecto
             accion = f"Resultado desconocido '{resultado_test}': usando GDL por defecto"
-            print(f"ADVERTENCIA: Resultado de test desconocido: '{resultado_test}'")
+            self.stdout.write(f"ADVERTENCIA: Resultado de test desconocido: '{resultado_test}'")
         
         resultado_dict['stage_final'] = stage_final
         resultado_dict['accion'] = accion
-        print(f"Acción determinada: {accion}")
-        print(f"Stage final: {stage_final}")
+        self.stdout.write(f"Acción determinada: {accion}")
+        self.stdout.write(f"Stage final: {stage_final}")
         
         # Paso 3: Registrar en historial si es falla
-        if resultado_upper == 'FAIL' and test_history_model:
-            try:
-                from django.utils import timezone
-                registro = test_history_model.objects.create(
-                    serial_number=serial_number,
-                    resultado='FAIL',
-                    flujo=flujo_actual,
-                    stage_utilizado=stage_final,
-                    fecha_test=timezone.now(),
-                    accion=accion
-                )
-                resultado_dict['registro_historial'] = True
-                print(f"Registro de falla guardado en TestHistory. ID: {registro.id}")
-            except Exception as e:
-                print(f"ERROR al guardar en historial: {e}")
+        if resultado_upper == 'FAIL':
+            self.stdout.write(f"Es una falla, pero no se registra historial adicional aquí")
+            resultado_dict['registro_historial'] = True
         
-        print(f"{'='*60}")
-        print(f"PROCESAMIENTO COMPLETADO PARA: {serial_number}")
-        print(f"Stage final: {stage_final}")
-        print(f"{'='*60}\n")
+        self.stdout.write(f"{'='*60}")
+        self.stdout.write(f"PROCESAMIENTO COMPLETADO PARA: {serial_number}")
+        self.stdout.write(f"Stage final: {stage_final}")
+        self.stdout.write(f"{'='*60}\n")
         
         return resultado_dict
+    # ============================================================================
+    # CAMBIO FIN: Métodos SOAP modificados para adaptarse a esta clase
+    # ============================================================================
