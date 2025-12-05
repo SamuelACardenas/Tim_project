@@ -165,6 +165,7 @@ class Command(BaseCommand):
             # ============================================================================
             # CAMBIO COMIENZO: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
+            """
             try:
                 sftp.mkdir('C:/LOG/TIM/processed')
             except:
@@ -175,7 +176,7 @@ class Command(BaseCommand):
             
             self.stdout.write(self.style.SUCCESS(
                 f'Archivo movido a processed: {filename}'
-            ))
+            ))"""
             # ============================================================================
             # CAMBIO FIN: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
@@ -375,6 +376,9 @@ class Command(BaseCommand):
     def extract_standardized_error(self, raw_content, station_type, filename):
         """Convierte mensajes de error crudos a mensajes estandarizados"""
         raw_content = raw_content.lower()
+
+        if not hasattr(self, "compiled_error_patterns"):
+            self.compiled_error_patterns = {}
         
         # Mapeo de patrones de error a mensajes estandarizados por estación
         error_patterns = {
@@ -483,10 +487,16 @@ class Command(BaseCommand):
             ]
         }
         
-        # Buscar patrones según el tipo de estación
-        patterns = error_patterns.get(station_type, [])
-        for pattern, standardized_message in patterns:
-            if re.search(pattern, raw_content, re.IGNORECASE | re.DOTALL):
+        # Compilar solo una vez por estación
+        if station_type not in self.compiled_error_patterns:
+            self.compiled_error_patterns[station_type] = [
+                (re.compile(pattern, re.IGNORECASE | re.DOTALL), message)
+                for pattern, message in error_patterns.get(station_type, [])
+            ]
+
+        # Buscar coincidencias usando los patrones compilados
+        for compiled_pattern, standardized_message in self.compiled_error_patterns[station_type]:
+            if compiled_pattern.search(raw_content):
                 return standardized_message
         
         # Si no se encuentra patrón, usar fallback
