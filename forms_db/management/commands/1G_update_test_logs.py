@@ -1,31 +1,34 @@
 import os
 import paramiko
 import re
+import json
+import base64
 from pathlib import Path
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.conf import settings
 from django.contrib.auth.models import User
 from forms_db.models import Uut, TestHistory, Station, Employes, Booms, Failures, ErrorMessages
 from io import StringIO
-from ast import operator
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from suds.client import Client
-import logging
-from xml.dom.minidom import parseString
-from suds.plugin import MessagePlugin
-from lxml import etree
-import requests
-import xml
-import time
-from datetime import datetime, timedelta
-from django.db.models import Q
 import socket
 
 class Command(BaseCommand):
     help = 'Actualiza logs de prueba desde estaciones remotas para proyecto TIM'
     
     def handle(self, *args, **options):#######################################aqui
+        # ============================================================================
+        # MODIFICACIÓN COMIENZO: Cargar sesiones de la aplicación gráfica
+        # ============================================================================
+        station_sessions = self.load_station_sessions()
+        # ============================================================================
+        # MODIFICACIÓN FIN: Cargar sesiones de la aplicación gráfica
+        # ============================================================================
+        
         estaciones_dict = [
             #{"ip": "10.12.199.150", "nombre": "RUNIN 01", "usuario": "User"},
             #{"ip": "10.12.199.155", "nombre": "RUNIN 02", "usuario": "user"},
@@ -37,18 +40,184 @@ class Command(BaseCommand):
             #{"ip": "10.12.199.175", "nombre": "FCA 02", "usuario": "user"},
         ]
         
+        # ============================================================================
+        # MODIFICACIÓN COMIENZO: Mostrar información de sesiones cargadas
+        # ============================================================================
+        self.stdout.write(self.style.SUCCESS(
+            f"Sesiones cargadas: {len(station_sessions)} estaciones RUNIN con login activo"
+        ))
+        # ============================================================================
+        # MODIFICACIÓN FIN: Mostrar información de sesiones cargadas
+        # ============================================================================
+        
         for estacion in estaciones_dict:
             ip = estacion["ip"]
             nombre = estacion["nombre"]
-            usuario = estacion["usuario"]
+            usuario_default = estacion["usuario"]
 
-            password = self.get_password(nombre)
+            # ============================================================================
+            # MODIFICACIÓN COMIENZO: Para RUNIN, buscar sesión de la app gráfica
+            # ============================================================================
+            session_credentials = None
+            if "RUNIN" in nombre.upper():
+                session_credentials = self.find_session_for_station(nombre, ip, station_sessions)
+            # ============================================================================
+            # MODIFICACIÓN FIN: Para RUNIN, buscar sesión de la app gráfica
+            # ============================================================================
+            
+            # ============================================================================
+            # MODIFICACIÓN COMIENZO: Lógica para usar sesiones de app gráfica cuando estén disponibles
+            # ============================================================================
+            if session_credentials:
+                # Usar credenciales de la app gráfica
+                username = session_credentials['username']
+                password = session_credentials['password']
+                
+                self.stdout.write(self.style.SUCCESS(
+                    f"Procesando {nombre} con usuario de sesión: {username}"
+                ))
+                
+                try:
+                    # Obtener el empleado de la sesión para usar en los registros
+                    session_employee = self.get_employee_from_session(session_credentials)
+                    self.process_station_with_session(ip, nombre, username, password, session_employee)
+                except Exception as e:
+                    self.stdout.write(self.style.ERROR(
+                        f"Error con sesión de app gráfica en {nombre}: {str(e)}"
+                    ))
+                    # Fallback a credenciales por defecto
+                    password = self.get_password(nombre)
+                    self.process_station(ip, nombre, usuario_default, password, None)
+            else:
+                # Usar credenciales por defecto
+                password = self.get_password(nombre)
+                try:
+                    self.process_station(ip, nombre, usuario_default, password, None)
+                except Exception as e:
+                    self.stdout.write(self.style.ERROR(f'Error en estación {nombre}: {str(e)}'))
+            # ============================================================================
+            # MODIFICACIÓN FIN: Lógica para usar sesiones de app gráfica cuando estén disponibles
+            # ============================================================================
 
-            try:
-                self.process_station(ip, nombre, usuario, password)
-            except Exception as e:
-                self.stdout.write(self.style.ERROR(f'Error en estación {nombre}: {str(e)}'))
+    # ============================================================================
+    # MODIFICACIÓN COMIENZO: MÉTODOS DE GESTIÓN DE SESIONES DE LA APP GRÁFICA
+    # Nuevos métodos para manejar sesiones de la aplicación gráfica
+    # ============================================================================
+    
+    def load_station_sessions(self):
+        """Carga las sesiones de la aplicación gráfica"""
+        try:
+            config_file = "station_sessions.json"
+            
+            if not os.path.exists(config_file):
+                self.stdout.write(self.style.WARNING(
+                    "No se encontró archivo de sesiones de la aplicación gráfica"
+                ))
+                return {}
+            
+            with open(config_file, 'r') as f:
+                all_sessions = json.load(f)
+            
+            # Desencriptar credenciales
+            decrypted_sessions = {}
+            system_id = os.environ.get('COMPUTERNAME', 'default_system')
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=b'session_salt',
+                iterations=100000,
+            )
+            key = base64.urlsafe_b64encode(kdf.derive(system_id.encode()))
+            fernet = Fernet(key)
+            
+            for station_name, session_data in all_sessions.items():
+                if session_data.get('logged_in', False):
+                    try:
+                        username = fernet.decrypt(session_data['username'].encode()).decode()
+                        password = fernet.decrypt(session_data['password'].encode()).decode()
+                        
+                        decrypted_sessions[station_name] = {
+                            'station_ip': session_data.get('station_ip'),
+                            'username': username,
+                            'password': password,
+                            'user_data': session_data.get('user_data', {})
+                        }
+                        
+                        self.stdout.write(self.style.SUCCESS(
+                            f"Sesión activa: {station_name} -> {username}"
+                        ))
+                        
+                    except Exception as e:
+                        self.stdout.write(self.style.ERROR(
+                            f"Error desencriptando sesión de {station_name}: {e}"
+                        ))
+            
+            return decrypted_sessions
+            
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(
+                f"Error cargando sesiones: {e}"
+            ))
+            return {}
 
+    def find_session_for_station(self, station_name, station_ip, sessions):
+        """Encuentra sesión por nombre de estación o IP"""
+        # Buscar por nombre exacto
+        if station_name in sessions:
+            return sessions[station_name]
+        
+        # Buscar por IP (como fallback)
+        for session_station, session_data in sessions.items():
+            if session_data.get('station_ip') == station_ip:
+                self.stdout.write(self.style.SUCCESS(
+                    f"Sesión encontrada por IP: {station_ip} -> {session_station}"
+                ))
+                return session_data
+        
+        return None
+
+    def get_employee_from_session(self, session_credentials):
+        """Obtiene el objeto Employes desde las credenciales de sesión"""
+        try:
+            username = session_credentials['username']
+            
+            # Buscar el usuario en la base de datos
+            user = User.objects.get(username=username)
+            
+            # Buscar el empleado asociado
+            employee = Employes.objects.get(employeeNumber=user)
+            
+            self.stdout.write(self.style.SUCCESS(
+                f"Empleado de sesión: {employee.employeeName} ({username})"
+            ))
+            
+            return employee
+            
+        except User.DoesNotExist:
+            self.stdout.write(self.style.ERROR(
+                f"Usuario no encontrado en BD: {username}"
+            ))
+            return None
+        except Employes.DoesNotExist:
+            self.stdout.write(self.style.ERROR(
+                f"Empleado no encontrado para usuario: {username}"
+            ))
+            return None
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(
+                f"Error obteniendo empleado: {e}"
+            ))
+            return None
+    
+    # ============================================================================
+    # MODIFICACIÓN FIN: MÉTODOS DE GESTIÓN DE SESIONES DE LA APP GRÁFICA
+    # ============================================================================
+
+    # ============================================================================
+    # MÉTODOS PRINCIPALES DE PROCESAMIENTO (MODIFICADOS PARA SESIONES)
+    # Se mantienen los métodos existentes pero se modifican para aceptar session_employee
+    # ============================================================================
+    
     def get_password(self, nombre_estacion):
         nombre = nombre_estacion.upper()
         numero = nombre_estacion[-2:].strip().zfill(2)
@@ -62,13 +231,82 @@ class Command(BaseCommand):
         else:
             return "default_password"
 
-    def process_station(self, ip, estacion_nombre, usuario, password):
+    # ============================================================================
+    # MODIFICACIÓN COMIENZO: Nuevo método para procesar estaciones con sesión
+    # ============================================================================
+    def process_station_with_session(self, ip, estacion_nombre, usuario, password, session_employee):
+        """Procesa estación RUNIN con credenciales de sesión"""
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         try:
             self.stdout.write(self.style.SUCCESS(
-                f"Intentando conectar a {estacion_nombre} ({ip}) con usuario '{usuario}'"
+                f"Intentando conectar a {estacion_nombre} ({ip}) con usuario de sesión '{usuario}'"
+            ))
+
+            client.connect(ip, port=22, username=usuario, password=password, timeout=10)
+
+            self.stdout.write(self.style.SUCCESS(
+                f"Conectado exitosamente a {estacion_nombre} ({ip}) con usuario de sesión"
+            ))
+
+            sftp = client.open_sftp()
+
+            # Verificar/Crear directorio TIM log remoto
+            try:
+                sftp.chdir('C:/LOG/TIM')
+            except FileNotFoundError:
+                sftp.mkdir('C:/LOG/TIM')
+                sftp.chdir('C:/LOG/TIM')
+
+            archivos_remotos = sftp.listdir()
+
+            for archivo in archivos_remotos:
+                if archivo.endswith((".log")) and ("[FAIL]" in archivo or "[PASS]" in archivo):
+                    try:
+                        # ============================================================================
+                        # MODIFICACIÓN: Pasar el empleado de sesión al procesamiento de archivos
+                        # ============================================================================
+                        self.process_single_file(sftp, archivo, ip, estacion_nombre, session_employee)
+                        # ============================================================================
+                        # MODIFICACIÓN FIN: Pasar el empleado de sesión al procesamiento de archivos
+                        # ============================================================================
+                    except Exception as e:
+                        self.stdout.write(self.style.WARNING(f'Error procesando {archivo}: {str(e)}'))
+                else:
+                    pass
+
+            sftp.close()
+
+        except paramiko.AuthenticationException:
+            self.stdout.write(self.style.ERROR(
+                f"Error de autenticación en {estacion_nombre} con usuario de sesión {usuario}"
+            ))
+            # Fallback a credenciales por defecto
+            default_password = self.get_password(estacion_nombre)
+            self.stdout.write(self.style.WARNING(
+                f"Intentando con credenciales por defecto para {estacion_nombre}"
+            ))
+            self.process_station(ip, estacion_nombre, 'PMDU', default_password, None)
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f'Error de conexión con {ip}: {str(e)}'))
+        finally:
+            client.close()
+    # ============================================================================
+    # MODIFICACIÓN FIN: Nuevo método para procesar estaciones con sesión
+    # ============================================================================
+
+    # ============================================================================
+    # MODIFICACIÓN COMIENZO: Método process_station modificado para aceptar session_employee
+    # ============================================================================
+    def process_station(self, ip, estacion_nombre, usuario, password, session_employee=None):
+        """Procesa estación con credenciales por defecto"""
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        try:
+            self.stdout.write(self.style.SUCCESS(
+                f"Intentando conectar a {estacion_nombre} ({ip}) con usuario por defecto '{usuario}'"
             ))
 
             client.connect(ip, port=22, username=usuario, password=password, timeout=10)
@@ -91,7 +329,13 @@ class Command(BaseCommand):
             for archivo in archivos_remotos:
                 if archivo.endswith((".log")) and ("[FAIL]" in archivo or "[PASS]" in archivo):
                     try:
-                        self.process_single_file(sftp, archivo, ip, estacion_nombre)
+                        # ============================================================================
+                        # MODIFICACIÓN: Pasar session_employee (puede ser None)
+                        # ============================================================================
+                        self.process_single_file(sftp, archivo, ip, estacion_nombre, session_employee)
+                        # ============================================================================
+                        # MODIFICACIÓN FIN: Pasar session_employee (puede ser None)
+                        # ============================================================================
                     except Exception as e:
                         self.stdout.write(self.style.WARNING(f'Error procesando {archivo}: {str(e)}'))
                 else:
@@ -103,8 +347,15 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f'Error de conexión con {ip}: {str(e)}'))
         finally:
             client.close()
+    # ============================================================================
+    # MODIFICACIÓN FIN: Método process_station modificado para aceptar session_employee
+    # ============================================================================
 
-    def process_single_file(self, sftp, filename, ip, estacion_nombre):
+    # ============================================================================
+    # MODIFICACIÓN COMIENZO: Método process_single_file modificado para aceptar session_employee
+    # ============================================================================
+    def process_single_file(self, sftp, filename, ip, estacion_nombre, session_employee=None):
+        """Procesa un archivo individual - MODIFICADO para aceptar session_employee"""
         remote_path = filename 
         remote_backup_path = f"processed/{filename}"
         is_pass = "PASS" in filename
@@ -180,20 +431,33 @@ class Command(BaseCommand):
             # ============================================================================
             # CAMBIO FIN: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
-
+            
             # ============================================================================
             # CAMBIO COMIENZO: Registrar en BD solo si es GDL
             # ============================================================================
             if factory_value.upper() == 'GDL':
-                uut = self.register_uut(log_info, is_pass)
-                test_history = self.register_test_history(uut, ip, estacion_nombre, log_info, is_pass)
+                # ============================================================================
+                # MODIFICACIÓN: Pasar el empleado de sesión a los métodos de registro
+                # ============================================================================
+                uut = self.register_uut(log_info, is_pass, session_employee)
+                test_history = self.register_test_history(uut, ip, estacion_nombre, log_info, is_pass, session_employee)
                 
                 if not is_pass:
-                    self.register_failure(uut, ip, estacion_nombre, log_info)
+                    self.register_failure(uut, ip, estacion_nombre, log_info, session_employee)
+                # ============================================================================
+                # MODIFICACIÓN FIN: Pasar el empleado de sesión a los métodos de registro
+                # ============================================================================
                 
+                # ============================================================================
+                # MODIFICACIÓN COMIENZO: Mostrar información del empleado en el log
+                # ============================================================================
+                employee_info = session_employee.employeeName if session_employee else "Sistema"
                 self.stdout.write(self.style.SUCCESS(
-                    f"Procesado (GDL): {filename} | SN: {log_info['sn']} | {'PASS' if is_pass else 'FAIL'}"
+                    f"Procesado (GDL): {filename} | SN: {log_info['sn']} | Empleado: {employee_info} | {'PASS' if is_pass else 'FAIL'}"
                 ))
+                # ============================================================================
+                # MODIFICACIÓN FIN: Mostrar información del empleado en el log
+                # ============================================================================
             else:
                 # NO-GDL: Solo copia local y mover archivo, no registro en BD
                 self.stdout.write(self.style.SUCCESS(
@@ -210,6 +474,9 @@ class Command(BaseCommand):
             ))
             # En caso de error, NO mover el archivo para reintentar después
             raise
+    # ============================================================================
+    # MODIFICACIÓN FIN: Método process_single_file modificado para aceptar session_employee
+    # ============================================================================
 
 
     # Metodo para probar ajustar GDL y no-GDL en base al operador-id
@@ -577,8 +844,12 @@ class Command(BaseCommand):
         
         return ''
 
-    def register_uut(self, log_info, is_pass):
-        """Registra o actualiza una UUT en la base de datos"""
+    # ============================================================================
+    # MODIFICACIÓN COMIENZO: Métodos de registro modificados para aceptar session_employee
+    # ============================================================================
+    
+    def register_uut(self, log_info, is_pass, session_employee=None):
+        """Registra o actualiza una UUT en la base de datos - MODIFICADO"""
         try:
             # Primero verificar si la UUT ya existe
             existing_uut = Uut.objects.filter(sn=log_info['sn']).first()
@@ -591,15 +862,30 @@ class Command(BaseCommand):
                 return existing_uut
 
             employee = None
+            
+            # ============================================================================
+            # MODIFICACIÓN COMIENZO: PRIORIDAD DE EMPLEADOS
+            # 1. Operador del log (si existe y se encuentra)
+            # 2. Empleado de la sesión (para RUNIN con app gráfica)
+            # 3. None (para otras estaciones o sin sesión)
+            # ============================================================================
             if log_info['operator_id']:
                 try:
                     user = User.objects.get(username=log_info['operator_id'].strip())
                     employee = Employes.objects.get(employeeNumber=user)
-                except (User.DoesNotExist, Employes.DoesNotExist):
-                    employee = None
-                    self.stdout.write(self.style.WARNING(
-                    f'Empleado {log_info["operator_id"]} no encontrado'
+                    self.stdout.write(self.style.SUCCESS(
+                        f'Usando operador del log: {employee.employeeName}'
                     ))
+                except (User.DoesNotExist, Employes.DoesNotExist):
+                    self.stdout.write(self.style.WARNING(
+                        f'Operador {log_info["operator_id"]} no encontrado'
+                    ))
+                    employee = session_employee  # Fallback a empleado de sesión
+            else:
+                employee = session_employee  # Usar empleado de sesión si no hay operador
+            # ============================================================================
+            # MODIFICACIÓN FIN: PRIORIDAD DE EMPLEADOS
+            # ============================================================================
             
             pn_b = None
             if log_info['part_number']:
@@ -613,64 +899,86 @@ class Command(BaseCommand):
                 sn=log_info['sn'],
                 defaults={
                     'date': log_info['log_datetime'] or timezone.now(),
-                    'employee_e': employee,
+                    'employee_e': employee,  # Usar el empleado determinado
                     'pn_b': pn_b,
                     'status': not is_pass
                 }
             )
             
             if created:
-                self.stdout.write(self.style.SUCCESS(f'Nueva UUT creada: {log_info["sn"]}'))
+                employee_name = employee.employeeName if employee else "Sistema"
+                self.stdout.write(self.style.SUCCESS(
+                    f'Nueva UUT creada: {log_info["sn"]} por {employee_name}'
+                ))
             
             return uut
             
         except Exception as e:
             raise ValueError(f'Error registrando UUT: {str(e)}')
 
-    def register_test_history(self, uut, ip, estacion_nombre, log_info, is_pass):
-        """Registra el historial de pruebas"""
+    def register_test_history(self, uut, ip, estacion_nombre, log_info, is_pass, session_employee=None):
+        """Registra el historial de pruebas - MODIFICADO"""
         try:
             # Usar la estación de la IP, no del log
             station, _ = Station.objects.get_or_create(stationName=estacion_nombre)
 
             employee = None
+            
+            # ============================================================================
+            # MODIFICACIÓN: Misma lógica de prioridad que en register_uut
+            # ============================================================================
             if log_info['operator_id']:
                 try:
                     user = User.objects.get(username=log_info['operator_id'].strip())
                     employee = Employes.objects.get(employeeNumber=user)
                 except (User.DoesNotExist, Employes.DoesNotExist):
-                    employee = None
-                    self.stdout.write(self.style.WARNING(
-                    f'Empleado {log_info["operator_id"]} no encontrado'
-                    ))
+                    employee = session_employee
+            else:
+                employee = session_employee
+            # ============================================================================
+            # MODIFICACIÓN FIN: Misma lógica de prioridad que en register_uut
+            # ============================================================================
             
-            return TestHistory.objects.create(
+            test_history = TestHistory.objects.create(
                 uut=uut,
                 station=station,
-                employee_e=employee,
+                employee_e=employee,  # Usar el empleado determinado
                 status=is_pass,
                 test_date=log_info['log_datetime'] or timezone.now()
             )
             
+            employee_name = employee.employeeName if employee else "Sistema"
+            self.stdout.write(self.style.SUCCESS(
+                f'TestHistory registrado por: {employee_name}'
+            ))
+            
+            return test_history
+            
         except Exception as e:
             raise ValueError(f'Error registrando TestHistory: {str(e)}')
 
-    def register_failure(self, uut, ip, estacion_nombre, log_info):
-        """Registra una falla en la base de datos"""
+    def register_failure(self, uut, ip, estacion_nombre, log_info, session_employee=None):
+        """Registra una falla en la base de datos - MODIFICADO"""
         try:
             # Usar la estación de la IP, no del log
             station, _ = Station.objects.get_or_create(stationName=estacion_nombre)
             
             employee = None
+            
+            # ============================================================================
+            # MODIFICACIÓN: Misma lógica de prioridad que en register_uut
+            # ============================================================================
             if log_info['operator_id']:
                 try:
                     user = User.objects.get(username=log_info['operator_id'].strip())
                     employee = Employes.objects.get(employeeNumber=user)
                 except (User.DoesNotExist, Employes.DoesNotExist):
-                    employee = None
-                    self.stdout.write(self.style.WARNING(
-                    f'Empleado {log_info["operator_id"]} no encontrado'
-                    ))
+                    employee = session_employee
+            else:
+                employee = session_employee
+            # ============================================================================
+            # MODIFICACIÓN FIN: Misma lógica de prioridad que en register_uut
+            # ============================================================================
             
             hour = log_info['log_datetime'].hour if log_info['log_datetime'] else timezone.now().hour
             shift = '1' if 6 <= hour < 14 else '2' if 14 <= hour < 22 else '3'
@@ -688,14 +996,15 @@ class Command(BaseCommand):
                         error_message_obj, created = ErrorMessages.objects.get_or_create(
                             message=log_info['error_message'],
                             defaults={
-                                'employee_e': employee,
+                                'employee_e': employee,  # Usar el empleado determinado
                                 'pn_b': pn_b,
                                 'date': timezone.now()
                             }
                         )
                         if created:
+                            employee_name = employee.employeeName if employee else "Sistema"
                             self.stdout.write(self.style.SUCCESS(
-                                f'Nuevo mensaje de error registrado: {log_info["error_message"]}'
+                                f'Nuevo mensaje de error registrado por: {employee_name}'
                             ))
                 except Exception as e:
                     self.stdout.write(self.style.ERROR(
@@ -707,7 +1016,7 @@ class Command(BaseCommand):
                 sn_f=uut,
                 failureDate=log_info['log_datetime'] or timezone.now(),
                 id_er=error_message_obj,
-                employee_e=employee,
+                employee_e=employee,  # Usar el empleado determinado
                 shiftFailure=shift,
                 analysis='',
                 rootCause='',
@@ -717,14 +1026,18 @@ class Command(BaseCommand):
                 comments=f'Error detectado automáticamente desde estación {estacion_nombre}'
             )
             
+            employee_name = employee.employeeName if employee else "Sistema"
             self.stdout.write(self.style.SUCCESS(
-                f'Falla registrada para SN: {uut.sn} - {log_info.get("error_message", "Error no especificado")}'
+                f'Falla registrada por {employee_name} para SN: {uut.sn}'
             ))
             
             return failure
             
         except Exception as e:
             raise ValueError(f'Error registrando Falla: {str(e)}')
+    # ============================================================================
+    # MODIFICACIÓN FIN: Métodos de registro modificados para aceptar session_employee
+    # ============================================================================
         
 
     # ============================================================================
