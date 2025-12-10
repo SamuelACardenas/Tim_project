@@ -25,6 +25,9 @@ class Command(BaseCommand):
         # MODIFICACIÓN COMIENZO: Cargar sesiones de la aplicación gráfica
         # ============================================================================
         station_sessions = self.load_station_sessions()
+        station_sessions = self.load_station_sessions()
+        self.debug_sessions(station_sessions)  # <-- Agrega esta línea
+
         # ============================================================================
         # MODIFICACIÓN FIN: Cargar sesiones de la aplicación gráfica
         # ============================================================================
@@ -1295,8 +1298,4 @@ class Command(BaseCommand):
             self.stdout.write(f"  Usuario: {data.get('username', 'No disponible')[:20]}...")
             self.stdout.write(f"  Logged in: {data.get('logged_in', False)}")
         
-        self.stdout.write(self.style.WARNING("=== FIN DEBUG ==="))
-
-    # Luego en handle(), después de cargar sesiones:
-    station_sessions = self.load_station_sessions()
-    self.debug_sessions(station_sessions)  # <-- Agrega esta línea    
+        self.stdout.write(self.style.WARNING("=== FIN DEBUG ==="))    
