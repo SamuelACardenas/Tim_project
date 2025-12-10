@@ -160,17 +160,34 @@ class Command(BaseCommand):
             ))
             return {}
 
+# En el script Django, modifica el método find_session_for_station:
     def find_session_for_station(self, station_name, station_ip, sessions):
-        """Encuentra sesión por nombre de estación o IP"""
-        # Buscar por nombre exacto
-        if station_name in sessions:
-            return sessions[station_name]
+        """Encuentra sesión por nombre de estación o IP - MEJORADO"""
+        # Normalizar nombres
+        normalized_input = station_name.replace("-", " ").upper().strip()
+        
+        # Buscar por nombre exacto (con espacios o guiones)
+        for session_station in sessions.keys():
+            normalized_session = session_station.replace("-", " ").upper().strip()
+            if normalized_session == normalized_input:
+                self.stdout.write(self.style.SUCCESS(
+                    f"Sesión encontrada por nombre: {session_station}"
+                ))
+                return sessions[session_station]
         
         # Buscar por IP (como fallback)
         for session_station, session_data in sessions.items():
             if session_data.get('station_ip') == station_ip:
                 self.stdout.write(self.style.SUCCESS(
                     f"Sesión encontrada por IP: {station_ip} -> {session_station}"
+                ))
+                return session_data
+        
+        # Último intento: buscar por IP parcial
+        for session_station, session_data in sessions.items():
+            if session_data.get('station_ip') and station_ip in session_data.get('station_ip'):
+                self.stdout.write(self.style.SUCCESS(
+                    f"Sesión encontrada por IP parcial: {station_ip} -> {session_station}"
                 ))
                 return session_data
         
@@ -431,7 +448,7 @@ class Command(BaseCommand):
             # ============================================================================
             # CAMBIO FIN: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
-            
+
             # ============================================================================
             # CAMBIO COMIENZO: Registrar en BD solo si es GDL
             # ============================================================================
@@ -1264,3 +1281,22 @@ class Command(BaseCommand):
     # ============================================================================
     # CAMBIO FIN: Métodos SOAP modificados para adaptarse a esta clase
     # ============================================================================
+
+    def debug_sessions(self, sessions):
+        """Muestra información de debug de las sesiones"""
+        self.stdout.write(self.style.WARNING("=== DEBUG DE SESIONES ==="))
+        if not sessions:
+            self.stdout.write("No hay sesiones cargadas")
+            return
+        
+        for station_name, data in sessions.items():
+            self.stdout.write(f"\nEstación: {station_name}")
+            self.stdout.write(f"  IP guardada: {data.get('station_ip', 'No disponible')}")
+            self.stdout.write(f"  Usuario: {data.get('username', 'No disponible')[:20]}...")
+            self.stdout.write(f"  Logged in: {data.get('logged_in', False)}")
+        
+        self.stdout.write(self.style.WARNING("=== FIN DEBUG ==="))
+
+    # Luego en handle(), después de cargar sesiones:
+    station_sessions = self.load_station_sessions()
+    self.debug_sessions(station_sessions)  # <-- Agrega esta línea    
