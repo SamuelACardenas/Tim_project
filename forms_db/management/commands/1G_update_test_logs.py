@@ -471,7 +471,9 @@ class Command(BaseCommand):
             
             self.stdout.write(self.style.SUCCESS(
                 f'Archivo movido a processed: {filename}'
-            ))"""
+            ))
+
+            """
             # ============================================================================
             # CAMBIO FIN: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
