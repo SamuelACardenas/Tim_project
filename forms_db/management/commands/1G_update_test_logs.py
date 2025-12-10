@@ -476,7 +476,7 @@ class Command(BaseCommand):
             # CAMBIO FIN: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
 
-            """
+            
             ============================================================================
             CAMBIO COMIENZO: Registrar en BD solo si es GDL
             ============================================================================
@@ -497,7 +497,7 @@ class Command(BaseCommand):
                 MODIFICACIÓN FIN: Pasar el empleado de sesión a los métodos de registro
                 ============================================================================
                 
-                """
+                
                 ============================================================================
                 MODIFICACIÓN COMIENZO: Mostrar información del empleado en el log
                 ============================================================================
@@ -510,6 +510,7 @@ class Command(BaseCommand):
                 ============================================================================
                 MODIFICACIÓN FIN: Mostrar información del empleado en el log
                 ============================================================================
+                """
             else:
                 # NO-GDL: Solo copia local y mover archivo, no registro en BD
                 self.stdout.write(self.style.SUCCESS(
@@ -520,6 +521,7 @@ class Command(BaseCommand):
             ============================================================================
             CAMBIO FIN: Registrar en BD solo si es GDL
             ============================================================================
+            """
                 
         except Exception as e:
             self.stdout.write(self.style.ERROR(
@@ -586,11 +588,6 @@ class Command(BaseCommand):
             'log_datetime': None,
             'error_message': None,
             'station_id': None,
-            """
-            ============================================================================
-            CAMBIO COMIENZO: Se elimina 'factory' ya que se determinará por SOAP
-            ============================================================================
-            """
             'raw_content': ''
         }
         
