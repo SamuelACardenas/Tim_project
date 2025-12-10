@@ -20,17 +20,13 @@ import socket
 class Command(BaseCommand):
     help = 'Actualiza logs de prueba desde estaciones remotas para proyecto TIM'
     
-    def handle(self, *args, **options):#######################################aqui
-        # ============================================================================
-        # MODIFICACIÓN COMIENZO: Cargar sesiones de la aplicación gráfica
-        # ============================================================================
-        station_sessions = self.load_station_sessions()
-        station_sessions = self.load_station_sessions()
-        self.debug_sessions(station_sessions)  # <-- Agrega esta línea
-
-        # ============================================================================
-        # MODIFICACIÓN FIN: Cargar sesiones de la aplicación gráfica
-        # ============================================================================
+    def handle(self, *args, **options):
+        """
+        ============================================================================
+        MODIFICACIÓN COMIENZO: Flujo simplificado - Sin carga inicial de JSON
+        Ahora extraemos las sesiones directamente desde cada estación RUNIN
+        ============================================================================
+        """
         
         estaciones_dict = [
             #{"ip": "10.12.199.150", "nombre": "RUNIN 01", "usuario": "User"},
@@ -43,163 +39,147 @@ class Command(BaseCommand):
             #{"ip": "10.12.199.175", "nombre": "FCA 02", "usuario": "user"},
         ]
         
-        # ============================================================================
-        # MODIFICACIÓN COMIENZO: Mostrar información de sesiones cargadas
-        # ============================================================================
-        self.stdout.write(self.style.SUCCESS(
-            f"Sesiones cargadas: {len(station_sessions)} estaciones RUNIN con login activo"
-        ))
-        # ============================================================================
-        # MODIFICACIÓN FIN: Mostrar información de sesiones cargadas
-        # ============================================================================
-        
         for estacion in estaciones_dict:
             ip = estacion["ip"]
             nombre = estacion["nombre"]
             usuario_default = estacion["usuario"]
-
-            # ============================================================================
-            # MODIFICACIÓN COMIENZO: Para RUNIN, buscar sesión de la app gráfica
-            # ============================================================================
-            session_credentials = None
-            if "RUNIN" in nombre.upper():
-                session_credentials = self.find_session_for_station(nombre, ip, station_sessions)
-            # ============================================================================
-            # MODIFICACIÓN FIN: Para RUNIN, buscar sesión de la app gráfica
-            # ============================================================================
             
-            # ============================================================================
-            # MODIFICACIÓN COMIENZO: Lógica para usar sesiones de app gráfica cuando estén disponibles
-            # ============================================================================
-            if session_credentials:
-                # Usar credenciales de la app gráfica
-                username = session_credentials['username']
-                password = session_credentials['password']
-                
-                self.stdout.write(self.style.SUCCESS(
-                    f"Procesando {nombre} con usuario de sesión: {username}"
-                ))
-                
-                try:
-                    # Obtener el empleado de la sesión para usar en los registros
-                    session_employee = self.get_employee_from_session(session_credentials)
-                    self.process_station_with_session(ip, nombre, username, password, session_employee)
-                except Exception as e:
-                    self.stdout.write(self.style.ERROR(
-                        f"Error con sesión de app gráfica en {nombre}: {str(e)}"
-                    ))
-                    # Fallback a credenciales por defecto
-                    password = self.get_password(nombre)
-                    self.process_station(ip, nombre, usuario_default, password, None)
-            else:
-                # Usar credenciales por defecto
-                password = self.get_password(nombre)
-                try:
-                    self.process_station(ip, nombre, usuario_default, password, None)
-                except Exception as e:
-                    self.stdout.write(self.style.ERROR(f'Error en estación {nombre}: {str(e)}'))
-            # ============================================================================
-            # MODIFICACIÓN FIN: Lógica para usar sesiones de app gráfica cuando estén disponibles
-            # ============================================================================
+            # Inicialmente no tenemos sesión, se determinará al conectar
+            session_employee = None
+            
+            # Usar credenciales por defecto
+            password = self.get_password(nombre)
+            
+            self.stdout.write(self.style.SUCCESS(
+                f"Procesando estación: {nombre} ({ip})"
+            ))
+            
+            try:
+                self.process_station(ip, nombre, usuario_default, password, session_employee)
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f'Error en estación {nombre}: {str(e)}'))
+        """
+        ============================================================================
+        MODIFICACIÓN FIN: Flujo simplificado
+        ============================================================================
+        """
 
-    # ============================================================================
-    # MODIFICACIÓN COMIENZO: MÉTODOS DE GESTIÓN DE SESIONES DE LA APP GRÁFICA
-    # Nuevos métodos para manejar sesiones de la aplicación gráfica
-    # ============================================================================
+    """
+    ============================================================================
+    NUEVOS MÉTODOS COMIENZO: Extracción de sesiones JSON desde estaciones
+    ============================================================================
+    """
     
-    def load_station_sessions(self):
-        """Carga las sesiones de la aplicación gráfica"""
+    def extract_session_from_station(self, sftp, ip, estacion_nombre):
+        """
+        Extrae el archivo de sesiones JSON directamente desde la estación Windows
+        Busca en múltiples ubicaciones posibles donde podría estar el archivo
+        """
         try:
-            config_file = "station_sessions.json"
+            self.stdout.write(f"Buscando archivo de sesiones en {estacion_nombre}...")
             
-            if not os.path.exists(config_file):
+            # Rutas posibles donde podría estar el archivo JSON
+            possible_paths = [
+                # Escritorio del usuario (lo más común)
+                "C:/Users/User/Desktop/station_sessions.json",
+                "C:/Users/User/Downloads/station_sessions.json",
+                "C:/Users/User/Documents/station_sessions.json",
+                
+                # Directorio de la aplicación (si se ejecuta desde ahí)
+                "C:/TIM/station_sessions.json",
+                
+                # Directorio raíz o temporal
+                "C:/station_sessions.json",
+                "C:/Windows/Temp/station_sessions.json",
+            ]
+            
+            json_content = None
+            
+            for remote_path in possible_paths:
+                try:
+                    self.stdout.write(f"  Probando: {remote_path}")
+                    sftp.stat(remote_path)  # Verifica si existe
+                    
+                    # Leer el archivo
+                    with sftp.open(remote_path, 'rb') as remote_file:
+                        file_content = remote_file.read()
+                        json_content = json.loads(file_content.decode('utf-8'))
+                    
+                    self.stdout.write(self.style.SUCCESS(f"✓ Archivo encontrado en: {remote_path}"))
+                    
+                    # Buscar sesión específica para esta estación
+                    if estacion_nombre in json_content:
+                        station_session = json_content[estacion_nombre]
+                        
+                        # Verificar que tenga logged_in = True
+                        if station_session.get('logged_in', False):
+                            self.stdout.write(self.style.SUCCESS(
+                                f"✓ Sesión activa encontrada para {estacion_nombre}"
+                            ))
+                            return station_session
+                        else:
+                            self.stdout.write(self.style.WARNING(
+                                f"Sesión encontrada pero logged_in=False"
+                            ))
+                    else:
+                        self.stdout.write(self.style.WARNING(
+                            f"No hay sesión para {estacion_nombre} en el archivo"
+                        ))
+                    
+                    break  # Salir si encontramos el archivo
+                    
+                except FileNotFoundError:
+                    continue  # Intentar siguiente ruta
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f"Error leyendo {remote_path}: {str(e)}"))
+                    continue
+            
+            if json_content is None:
                 self.stdout.write(self.style.WARNING(
-                    "No se encontró archivo de sesiones de la aplicación gráfica"
+                    f"No se encontró archivo de sesiones en {estacion_nombre}"
                 ))
-                return {}
             
-            with open(config_file, 'r') as f:
-                all_sessions = json.load(f)
-            
-            # Desencriptar credenciales
-            decrypted_sessions = {}
-            system_id = os.environ.get('COMPUTERNAME', 'default_system')
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=b'session_salt',
-                iterations=100000,
-            )
-            key = base64.urlsafe_b64encode(kdf.derive(system_id.encode()))
-            fernet = Fernet(key)
-            
-            for station_name, session_data in all_sessions.items():
-                if session_data.get('logged_in', False):
-                    try:
-                        username = fernet.decrypt(session_data['username'].encode()).decode()
-                        password = fernet.decrypt(session_data['password'].encode()).decode()
-                        
-                        decrypted_sessions[station_name] = {
-                            'station_ip': session_data.get('station_ip'),
-                            'username': username,
-                            'password': password,
-                            'user_data': session_data.get('user_data', {})
-                        }
-                        
-                        self.stdout.write(self.style.SUCCESS(
-                            f"Sesión activa: {station_name} -> {username}"
-                        ))
-                        
-                    except Exception as e:
-                        self.stdout.write(self.style.ERROR(
-                            f"Error desencriptando sesión de {station_name}: {e}"
-                        ))
-            
-            return decrypted_sessions
+            return None
             
         except Exception as e:
-            self.stdout.write(self.style.ERROR(
-                f"Error cargando sesiones: {e}"
-            ))
-            return {}
+            self.stdout.write(self.style.ERROR(f"Error en extract_session_from_station: {str(e)}"))
+            return None
 
-# En el script Django, modifica el método find_session_for_station:
-    def find_session_for_station(self, station_name, station_ip, sessions):
-        """Encuentra sesión por nombre de estación o IP - MEJORADO"""
-        # Normalizar nombres
-        normalized_input = station_name.replace("-", " ").upper().strip()
-        
-        # Buscar por nombre exacto (con espacios o guiones)
-        for session_station in sessions.keys():
-            normalized_session = session_station.replace("-", " ").upper().strip()
-            if normalized_session == normalized_input:
-                self.stdout.write(self.style.SUCCESS(
-                    f"Sesión encontrada por nombre: {session_station}"
-                ))
-                return sessions[session_station]
-        
-        # Buscar por IP (como fallback)
-        for session_station, session_data in sessions.items():
-            if session_data.get('station_ip') == station_ip:
-                self.stdout.write(self.style.SUCCESS(
-                    f"Sesión encontrada por IP: {station_ip} -> {session_station}"
-                ))
-                return session_data
-        
-        # Último intento: buscar por IP parcial
-        for session_station, session_data in sessions.items():
-            if session_data.get('station_ip') and station_ip in session_data.get('station_ip'):
-                self.stdout.write(self.style.SUCCESS(
-                    f"Sesión encontrada por IP parcial: {station_ip} -> {session_station}"
-                ))
-                return session_data
-        
-        return None
-
-    def get_employee_from_session(self, session_credentials):
-        """Obtiene el objeto Employes desde las credenciales de sesión"""
+    def get_employee_from_json_session(self, json_session):
+        """
+        Obtiene el objeto Employes desde el JSON de sesión
+        El JSON tiene la estructura de la respuesta API que incluye user_data
+        """
         try:
-            username = session_credentials['username']
+            # El JSON tiene esta estructura:
+            # {
+            #   'station_ip': '10.12.199.165',
+            #   'username': 'gAAAAAB...',  # Encriptado
+            #   'password': 'gAAAAAB...',  # Encriptado
+            #   'user_data': { ... },      # Respuesta completa de la API
+            #   'timestamp': 1234567890,
+            #   'logged_in': True
+            # }
+            
+            user_data = json_session.get('user_data', {})
+            
+            if not user_data.get('success', False):
+                self.stdout.write(self.style.WARNING(
+                    "user_data no tiene success=True en JSON"
+                ))
+                return None
+            
+            # Extraer username del user_data (ya viene desencriptado en la respuesta API)
+            user_info = user_data.get('user', {})
+            username = user_info.get('username')
+            
+            if not username:
+                self.stdout.write(self.style.WARNING(
+                    "No se encontró username en user_data"
+                ))
+                return None
+            
+            self.stdout.write(f"Buscando empleado para usuario: {username}")
             
             # Buscar el usuario en la base de datos
             user = User.objects.get(username=username)
@@ -208,7 +188,7 @@ class Command(BaseCommand):
             employee = Employes.objects.get(employeeNumber=user)
             
             self.stdout.write(self.style.SUCCESS(
-                f"Empleado de sesión: {employee.employeeName} ({username})"
+                f"Empleado encontrado desde JSON: {employee.employeeName} ({username})"
             ))
             
             return employee
@@ -225,19 +205,16 @@ class Command(BaseCommand):
             return None
         except Exception as e:
             self.stdout.write(self.style.ERROR(
-                f"Error obteniendo empleado: {e}"
+                f"Error obteniendo empleado desde JSON: {e}"
             ))
             return None
     
-    # ============================================================================
-    # MODIFICACIÓN FIN: MÉTODOS DE GESTIÓN DE SESIONES DE LA APP GRÁFICA
-    # ============================================================================
+    """
+    ============================================================================
+    NUEVOS MÉTODOS FIN: Extracción de sesiones JSON desde estaciones
+    ============================================================================
+    """
 
-    # ============================================================================
-    # MÉTODOS PRINCIPALES DE PROCESAMIENTO (MODIFICADOS PARA SESIONES)
-    # Se mantienen los métodos existentes pero se modifican para aceptar session_employee
-    # ============================================================================
-    
     def get_password(self, nombre_estacion):
         nombre = nombre_estacion.upper()
         numero = nombre_estacion[-2:].strip().zfill(2)
@@ -251,11 +228,11 @@ class Command(BaseCommand):
         else:
             return "default_password"
 
-    # ============================================================================
-    # MODIFICACIÓN COMIENZO: Nuevo método para procesar estaciones con sesión
-    # ============================================================================
     def process_station_with_session(self, ip, estacion_nombre, usuario, password, session_employee):
-        """Procesa estación RUNIN con credenciales de sesión"""
+        """
+        Procesa estación RUNIN con credenciales de sesión
+        MODIFICADO: Ahora también busca JSON en la estación
+        """
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
@@ -271,6 +248,39 @@ class Command(BaseCommand):
             ))
 
             sftp = client.open_sftp()
+            
+            """
+            ============================================================================
+            MODIFICACIÓN COMIENZO: Buscar archivo de sesiones en el escritorio de Windows
+            ============================================================================
+            """
+            try:
+                json_session = self.extract_session_from_station(sftp, ip, estacion_nombre)
+                
+                if json_session and 'user_data' in json_session:
+                    # Obtener empleado desde el JSON de sesión
+                    session_employee = self.get_employee_from_json_session(json_session)
+                    if session_employee:
+                        self.stdout.write(self.style.SUCCESS(
+                            f"Empleado obtenido desde sesión JSON: {session_employee.employeeName}"
+                        ))
+                    else:
+                        self.stdout.write(self.style.WARNING(
+                            "No se pudo obtener empleado desde JSON, usando credenciales SSH"
+                        ))
+                else:
+                    self.stdout.write(self.style.WARNING(
+                        f"No se encontró sesión JSON válida en {estacion_nombre}"
+                    ))
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(
+                    f"Error extrayendo sesión JSON: {str(e)}"
+                ))
+            """
+            ============================================================================
+            MODIFICACIÓN FIN: Buscar archivo de sesiones
+            ============================================================================
+            """
 
             # Verificar/Crear directorio TIM log remoto
             try:
@@ -284,13 +294,7 @@ class Command(BaseCommand):
             for archivo in archivos_remotos:
                 if archivo.endswith((".log")) and ("[FAIL]" in archivo or "[PASS]" in archivo):
                     try:
-                        # ============================================================================
-                        # MODIFICACIÓN: Pasar el empleado de sesión al procesamiento de archivos
-                        # ============================================================================
                         self.process_single_file(sftp, archivo, ip, estacion_nombre, session_employee)
-                        # ============================================================================
-                        # MODIFICACIÓN FIN: Pasar el empleado de sesión al procesamiento de archivos
-                        # ============================================================================
                     except Exception as e:
                         self.stdout.write(self.style.WARNING(f'Error procesando {archivo}: {str(e)}'))
                 else:
@@ -312,15 +316,12 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f'Error de conexión con {ip}: {str(e)}'))
         finally:
             client.close()
-    # ============================================================================
-    # MODIFICACIÓN FIN: Nuevo método para procesar estaciones con sesión
-    # ============================================================================
 
-    # ============================================================================
-    # MODIFICACIÓN COMIENZO: Método process_station modificado para aceptar session_employee
-    # ============================================================================
     def process_station(self, ip, estacion_nombre, usuario, password, session_employee=None):
-        """Procesa estación con credenciales por defecto"""
+        """
+        Procesa estación con credenciales por defecto
+        MODIFICADO: Ahora también busca JSON para estaciones RUNIN
+        """
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
@@ -336,6 +337,32 @@ class Command(BaseCommand):
             ))
 
             sftp = client.open_sftp()
+            
+            """
+            ============================================================================
+            MODIFICACIÓN COMIENZO: Buscar JSON para estaciones RUNIN con credenciales por defecto
+            ============================================================================
+            """
+            if "RUNIN" in estacion_nombre.upper():
+                try:
+                    json_session = self.extract_session_from_station(sftp, ip, estacion_nombre)
+                    
+                    if json_session and 'user_data' in json_session:
+                        # Obtener empleado desde el JSON de sesión
+                        session_employee = self.get_employee_from_json_session(json_session)
+                        if session_employee:
+                            self.stdout.write(self.style.SUCCESS(
+                                f"Empleado obtenido desde sesión JSON: {session_employee.employeeName}"
+                            ))
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(
+                        f"Error buscando JSON en {estacion_nombre}: {str(e)}"
+                    ))
+            """
+            ============================================================================
+            MODIFICACIÓN FIN: Buscar JSON para estaciones RUNIN
+            ============================================================================
+            """
 
             # Verificar/Crear directorio TIM log remoto
             try:
@@ -349,13 +376,7 @@ class Command(BaseCommand):
             for archivo in archivos_remotos:
                 if archivo.endswith((".log")) and ("[FAIL]" in archivo or "[PASS]" in archivo):
                     try:
-                        # ============================================================================
-                        # MODIFICACIÓN: Pasar session_employee (puede ser None)
-                        # ============================================================================
                         self.process_single_file(sftp, archivo, ip, estacion_nombre, session_employee)
-                        # ============================================================================
-                        # MODIFICACIÓN FIN: Pasar session_employee (puede ser None)
-                        # ============================================================================
                     except Exception as e:
                         self.stdout.write(self.style.WARNING(f'Error procesando {archivo}: {str(e)}'))
                 else:
@@ -367,23 +388,21 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f'Error de conexión con {ip}: {str(e)}'))
         finally:
             client.close()
-    # ============================================================================
-    # MODIFICACIÓN FIN: Método process_station modificado para aceptar session_employee
-    # ============================================================================
 
-    # ============================================================================
-    # MODIFICACIÓN COMIENZO: Método process_single_file modificado para aceptar session_employee
-    # ============================================================================
     def process_single_file(self, sftp, filename, ip, estacion_nombre, session_employee=None):
-        """Procesa un archivo individual - MODIFICADO para aceptar session_employee"""
+        """
+        Procesa un archivo individual - MODIFICADO para aceptar session_employee
+        """
         remote_path = filename 
         remote_backup_path = f"processed/{filename}"
         is_pass = "PASS" in filename
         
         try:
-            # ============================================================================
-            # CAMBIO COMIENZO: Primero guardar copia local SIEMPRE (GDL o NO-GDL)
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO COMIENZO: Primero guardar copia local SIEMPRE (GDL o NO-GDL)
+            ============================================================================
+            """
             # 1. Guardar copia local del archivo original (esto siempre se hace)
             log_info = self.save_local_copy(sftp, remote_path, filename, estacion_nombre)
             
@@ -394,13 +413,17 @@ class Command(BaseCommand):
                 ))
                 # No movemos el archivo, queda para procesar manualmente
                 return
-            # ============================================================================
-            # CAMBIO FIN: Primero guardar copia local SIEMPRE
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO FIN: Primero guardar copia local SIEMPRE
+            ============================================================================
+            """
             
-            # ============================================================================
-            # CAMBIO COMIENZO: Lógica de consulta SOAP con manejo de errores de red
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO COMIENZO: Lógica de consulta SOAP con manejo de errores de red
+            ============================================================================
+            """
             resultado_test = 'PASS' if is_pass else 'FAIL'
             
             try:
@@ -429,9 +452,10 @@ class Command(BaseCommand):
                     f'El archivo {filename} NO será movido. Se reintentará en la próxima ejecución.'
                 ))
                 return  # Salir sin mover el archivo
-            # ============================================================================
-            # CAMBIO FIN: Lógica de consulta SOAP con manejo de errores de red
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO FIN: Lógica de consulta SOAP con manejo de errores de red
+            ============================================================================
 
             # ============================================================================
             # CAMBIO COMIENZO: Solo ahora mover el archivo después de procesamiento exitoso
@@ -452,41 +476,50 @@ class Command(BaseCommand):
             # CAMBIO FIN: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
 
-            # ============================================================================
-            # CAMBIO COMIENZO: Registrar en BD solo si es GDL
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO COMIENZO: Registrar en BD solo si es GDL
+            ============================================================================
+            """
             if factory_value.upper() == 'GDL':
-                # ============================================================================
-                # MODIFICACIÓN: Pasar el empleado de sesión a los métodos de registro
-                # ============================================================================
+                """
+                ============================================================================
+                MODIFICACIÓN: Pasar el empleado de sesión a los métodos de registro
+                ============================================================================
+                """
                 uut = self.register_uut(log_info, is_pass, session_employee)
                 test_history = self.register_test_history(uut, ip, estacion_nombre, log_info, is_pass, session_employee)
                 
                 if not is_pass:
                     self.register_failure(uut, ip, estacion_nombre, log_info, session_employee)
-                # ============================================================================
-                # MODIFICACIÓN FIN: Pasar el empleado de sesión a los métodos de registro
-                # ============================================================================
+                """
+                ============================================================================
+                MODIFICACIÓN FIN: Pasar el empleado de sesión a los métodos de registro
+                ============================================================================
                 
-                # ============================================================================
-                # MODIFICACIÓN COMIENZO: Mostrar información del empleado en el log
-                # ============================================================================
+                """
+                ============================================================================
+                MODIFICACIÓN COMIENZO: Mostrar información del empleado en el log
+                ============================================================================
+                """
                 employee_info = session_employee.employeeName if session_employee else "Sistema"
                 self.stdout.write(self.style.SUCCESS(
                     f"Procesado (GDL): {filename} | SN: {log_info['sn']} | Empleado: {employee_info} | {'PASS' if is_pass else 'FAIL'}"
                 ))
-                # ============================================================================
-                # MODIFICACIÓN FIN: Mostrar información del empleado en el log
-                # ============================================================================
+                """
+                ============================================================================
+                MODIFICACIÓN FIN: Mostrar información del empleado en el log
+                ============================================================================
             else:
                 # NO-GDL: Solo copia local y mover archivo, no registro en BD
                 self.stdout.write(self.style.SUCCESS(
                     f"Procesado (NO-GDL): {filename} | SN: {log_info.get('sn', 'N/A')} | "
                     f"Copia local guardada, archivo movido, NO registro en BD"
                 ))
-            # ============================================================================
-            # CAMBIO FIN: Registrar en BD solo si es GDL
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO FIN: Registrar en BD solo si es GDL
+            ============================================================================
                 
         except Exception as e:
             self.stdout.write(self.style.ERROR(
@@ -494,26 +527,11 @@ class Command(BaseCommand):
             ))
             # En caso de error, NO mover el archivo para reintentar después
             raise
-    # ============================================================================
-    # MODIFICACIÓN FIN: Método process_single_file modificado para aceptar session_employee
-    # ============================================================================
-
-
-    # Metodo para probar ajustar GDL y no-GDL en base al operador-id
-    #def determine_factory_from_operator(self, factory_value, operator_id):
-    #    if not operator_id:
-    #        return factory_value
-
-    #    op = operator_id.upper().replace(" ", "")
-
-    #    if "RMA" in op:
-    #        return "NO-GDL"
-
-    #    return "GDL"
-
 
     def save_local_copy(self, sftp, remote_path, filename, estacion_nombre):
-        """Guarda copia local exacta del archivo original y devuelve la información parseada"""
+        """
+        Guarda copia local exacta del archivo original y devuelve la información parseada
+        """
         try:
             # Obtener ruta base según configuración
             base_dir = Path(settings.STATIC_ROOT)
@@ -558,7 +576,9 @@ class Command(BaseCommand):
             raise
 
     def parse_log_file(self, remote_file, filename, estacion_nombre):
-        """Extrae información del archivo de log para proyecto TIM"""
+        """
+        Extrae información del archivo de log para proyecto TIM
+        """
         info = {
             'sn': '',
             'operator_id': None,
@@ -566,12 +586,26 @@ class Command(BaseCommand):
             'log_datetime': None,
             'error_message': None,
             'station_id': None,
-            # ============================================================================
-            # CAMBIO COMIENZO: Se elimina 'factory' ya que se determinará por SOAP
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO COMIENZO: Se elimina 'factory' ya que se determinará por SOAP
+            ============================================================================
+            """
             'raw_content': ''
         }
         
+    # Metodo para probar ajustar GDL y no-GDL en base al operador-id
+    #def determine_factory_from_operator(self, factory_value, operator_id):
+    #    if not operator_id:
+    #        return factory_value
+
+    #    op = operator_id.upper().replace(" ", "")
+
+    #    if "RMA" in op:
+    #        return "NO-GDL"
+
+    #    return "GDL"
+
         try:
             # Leer todo el contenido primero
             raw_content = remote_file.read()
@@ -638,14 +672,16 @@ class Command(BaseCommand):
                 if not info['part_number'] and "Part Number:" in linea:
                     info['part_number'] = linea.split("Part Number:")[1].strip()[:12]
 
-            # ============================================================================
-            # CAMBIO COMIENZO: Se elimina la extracción de "factory" del log
-            # Ya no se busca "Factory:" en el contenido del archivo
-            # ============================================================================
+            """
+            ============================================================================
+            CAMBIO COMIENZO: Se elimina la extracción de "factory" del log
+            Ya no se busca "Factory:" en el contenido del archivo
+            ============================================================================
 
-            # ============================================================================
-            # CAMBIO FIN: Se elimina la extracción de "factory" del log
-            # ============================================================================
+            ============================================================================
+            CAMBIO FIN: Se elimina la extracción de "factory" del log
+            ============================================================================
+            """
 
             # Si es archivo FAIL, extraer mensaje de error estandarizado
             if "FAIL" in filename and not info['error_message']:
@@ -659,9 +695,10 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f'Error leyendo archivo {filename}: {str(e)}'))
             return info
 
-
     def extract_standardized_error(self, raw_content, station_type, filename):
-        """Convierte mensajes de error crudos a mensajes estandarizados"""
+        """
+        Convierte mensajes de error crudos a mensajes estandarizados
+        """
         raw_content = raw_content.lower()
 
         if not hasattr(self, "compiled_error_patterns"):
@@ -790,7 +827,9 @@ class Command(BaseCommand):
         return self.extract_fallback_error(raw_content)
 
     def extract_fallback_error(self, raw_content):
-        """Extrae mensaje de error cuando no se encuentra patrón específico"""
+        """
+        Extrae mensaje de error cuando no se encuentra patrón específico
+        """
         # Buscar líneas que contengan palabras clave de error
         error_keywords = ['fail', 'error', 'timeout', 'crash', 'bad', 'wrong']
         lines = raw_content.split('\n')
@@ -811,7 +850,9 @@ class Command(BaseCommand):
         return first_lines
 
     def determine_station_type(self, estacion_nombre):
-        """Determina el tipo de estación basado en el nombre"""
+        """
+        Determina el tipo de estación basado en el nombre
+        """
         if 'BFT' in estacion_nombre:
             return 'BFT'
         elif 'RUNIN' in estacion_nombre:
@@ -822,7 +863,9 @@ class Command(BaseCommand):
             return 'UNKNOWN'
 
     def determine_project(self, log_info):
-        """Determina el proyecto basado en el part number"""
+        """
+        Determina el proyecto basado en el part number
+        """
         if not log_info.get('part_number'):
             return 'unknown'
         
@@ -836,7 +879,9 @@ class Command(BaseCommand):
             return 'unknown'
 
     def extract_datetime_from_filename(self, filename):
-        """Extrae fecha/hora del nombre del archivo"""
+        """
+        Extrae fecha/hora del nombre del archivo
+        """
         try:
             # Formato: [FCR1F89N84112][2025_09_01 23_27_03]BFT[FAIL].txt
             match = re.search(r'\[(\d{4}_\d{2}_\d{2} \d{2}_\d{2}_\d{2})\]', filename)
@@ -851,7 +896,9 @@ class Command(BaseCommand):
         return timezone.now()
 
     def extract_serial_from_filename(self, filename):
-        """Extrae número de serie del nombre del archivo"""
+        """
+        Extrae número de serie del nombre del archivo
+        """
         try:
             # Formato: [FCR1F89N84112][2025_09_01 23_27_03]BFT[FAIL].txt
             match = re.search(r'\[(FCR[A-Z0-9]+)\]', filename)
@@ -864,12 +911,16 @@ class Command(BaseCommand):
         
         return ''
 
-    # ============================================================================
-    # MODIFICACIÓN COMIENZO: Métodos de registro modificados para aceptar session_employee
-    # ============================================================================
+    """
+    ============================================================================
+    MODIFICACIÓN COMIENZO: Métodos de registro modificados para aceptar session_employee
+    ============================================================================
+    """
     
     def register_uut(self, log_info, is_pass, session_employee=None):
-        """Registra o actualiza una UUT en la base de datos - MODIFICADO"""
+        """
+        Registra o actualiza una UUT en la base de datos - MODIFICADO
+        """
         try:
             # Primero verificar si la UUT ya existe
             existing_uut = Uut.objects.filter(sn=log_info['sn']).first()
@@ -883,12 +934,14 @@ class Command(BaseCommand):
 
             employee = None
             
-            # ============================================================================
-            # MODIFICACIÓN COMIENZO: PRIORIDAD DE EMPLEADOS
-            # 1. Operador del log (si existe y se encuentra)
-            # 2. Empleado de la sesión (para RUNIN con app gráfica)
-            # 3. None (para otras estaciones o sin sesión)
-            # ============================================================================
+            """
+            ============================================================================
+            MODIFICACIÓN COMIENZO: PRIORIDAD DE EMPLEADOS
+            1. Operador del log (si existe y se encuentra)
+            2. Empleado de la sesión (para RUNIN con app gráfica)
+            3. None (para otras estaciones o sin sesión)
+            ============================================================================
+            """
             if log_info['operator_id']:
                 try:
                     user = User.objects.get(username=log_info['operator_id'].strip())
@@ -903,9 +956,11 @@ class Command(BaseCommand):
                     employee = session_employee  # Fallback a empleado de sesión
             else:
                 employee = session_employee  # Usar empleado de sesión si no hay operador
-            # ============================================================================
-            # MODIFICACIÓN FIN: PRIORIDAD DE EMPLEADOS
-            # ============================================================================
+            """
+            ============================================================================
+            MODIFICACIÓN FIN: PRIORIDAD DE EMPLEADOS
+            ============================================================================
+            """
             
             pn_b = None
             if log_info['part_number']:
@@ -928,7 +983,7 @@ class Command(BaseCommand):
             if created:
                 employee_name = employee.employeeName if employee else "Sistema"
                 self.stdout.write(self.style.SUCCESS(
-                    f'Nueva UUT creada: {log_info["sn"]} por {employee_name}'
+                    f'Nueva UUT creada: {log_info["sn"]} por {employee_name}"
                 ))
             
             return uut
@@ -937,16 +992,20 @@ class Command(BaseCommand):
             raise ValueError(f'Error registrando UUT: {str(e)}')
 
     def register_test_history(self, uut, ip, estacion_nombre, log_info, is_pass, session_employee=None):
-        """Registra el historial de pruebas - MODIFICADO"""
+        """
+        Registra el historial de pruebas - MODIFICADO
+        """
         try:
             # Usar la estación de la IP, no del log
             station, _ = Station.objects.get_or_create(stationName=estacion_nombre)
 
             employee = None
             
-            # ============================================================================
-            # MODIFICACIÓN: Misma lógica de prioridad que en register_uut
-            # ============================================================================
+            """
+            ============================================================================
+            MODIFICACIÓN: Misma lógica de prioridad que en register_uut
+            ============================================================================
+            """
             if log_info['operator_id']:
                 try:
                     user = User.objects.get(username=log_info['operator_id'].strip())
@@ -955,9 +1014,11 @@ class Command(BaseCommand):
                     employee = session_employee
             else:
                 employee = session_employee
-            # ============================================================================
-            # MODIFICACIÓN FIN: Misma lógica de prioridad que en register_uut
-            # ============================================================================
+            """
+            ============================================================================
+            MODIFICACIÓN FIN: Misma lógica de prioridad que en register_uut
+            ============================================================================
+            """
             
             test_history = TestHistory.objects.create(
                 uut=uut,
@@ -978,16 +1039,20 @@ class Command(BaseCommand):
             raise ValueError(f'Error registrando TestHistory: {str(e)}')
 
     def register_failure(self, uut, ip, estacion_nombre, log_info, session_employee=None):
-        """Registra una falla en la base de datos - MODIFICADO"""
+        """
+        Registra una falla en la base de datos - MODIFICADO
+        """
         try:
             # Usar la estación de la IP, no del log
             station, _ = Station.objects.get_or_create(stationName=estacion_nombre)
             
             employee = None
             
-            # ============================================================================
-            # MODIFICACIÓN: Misma lógica de prioridad que en register_uut
-            # ============================================================================
+            """
+            ============================================================================
+            MODIFICACIÓN: Misma lógica de prioridad que en register_uut
+            ============================================================================
+            """
             if log_info['operator_id']:
                 try:
                     user = User.objects.get(username=log_info['operator_id'].strip())
@@ -996,9 +1061,11 @@ class Command(BaseCommand):
                     employee = session_employee
             else:
                 employee = session_employee
-            # ============================================================================
-            # MODIFICACIÓN FIN: Misma lógica de prioridad que en register_uut
-            # ============================================================================
+            """
+            ============================================================================
+            MODIFICACIÓN FIN: Misma lógica de prioridad que en register_uut
+            ============================================================================
+            """
             
             hour = log_info['log_datetime'].hour if log_info['log_datetime'] else timezone.now().hour
             shift = '1' if 6 <= hour < 14 else '2' if 14 <= hour < 22 else '3'
@@ -1055,18 +1122,23 @@ class Command(BaseCommand):
             
         except Exception as e:
             raise ValueError(f'Error registrando Falla: {str(e)}')
-    # ============================================================================
-    # MODIFICACIÓN FIN: Métodos de registro modificados para aceptar session_employee
-    # ============================================================================
+    """
+    ============================================================================
+    MODIFICACIÓN FIN: Métodos de registro modificados para aceptar session_employee
+    ============================================================================
+    """
         
-
-    # ============================================================================
-    # CAMBIO COMIENZO: Métodos SOAP modificados para adaptarse a esta clase
-    # Incluye manejo mejorado de errores y conectividad
-    # ============================================================================
+    """
+    ============================================================================
+    CAMBIO COMIENZO: Métodos SOAP modificados para adaptarse a esta clase
+    Incluye manejo mejorado de errores y conectividad
+    ============================================================================
+    """
     
     def check_network_connectivity(self):
-        """Verifica si hay conectividad de red antes de intentar consultar SOAP"""
+        """
+        Verifica si hay conectividad de red antes de intentar consultar SOAP
+        """
         try:
             # Intentar hacer ping al servidor SOAP
             socket.setdefaulttimeout(5)  # 5 segundos timeout
@@ -1084,7 +1156,9 @@ class Command(BaseCommand):
     
     # Configuración del cliente SOAP
     def get_soap_client(self):
-        """Obtiene el cliente SOAP configurado"""
+        """
+        Obtiene el cliente SOAP configurado
+        """
         url = "http://10.12.197.87:9400/tst/pmdu/?wsdl"
         client = Client(url, retxml=True, timeout=10)  # Timeout de 10 segundos
         d = dict(http='http://10.12.197.87:9400')
@@ -1281,21 +1355,8 @@ class Command(BaseCommand):
         self.stdout.write(f"{'='*60}\n")
         
         return resultado_dict
-    # ============================================================================
-    # CAMBIO FIN: Métodos SOAP modificados para adaptarse a esta clase
-    # ============================================================================
-
-    def debug_sessions(self, sessions):
-        """Muestra información de debug de las sesiones"""
-        self.stdout.write(self.style.WARNING("=== DEBUG DE SESIONES ==="))
-        if not sessions:
-            self.stdout.write("No hay sesiones cargadas")
-            return
-        
-        for station_name, data in sessions.items():
-            self.stdout.write(f"\nEstación: {station_name}")
-            self.stdout.write(f"  IP guardada: {data.get('station_ip', 'No disponible')}")
-            self.stdout.write(f"  Usuario: {data.get('username', 'No disponible')[:20]}...")
-            self.stdout.write(f"  Logged in: {data.get('logged_in', False)}")
-        
-        self.stdout.write(self.style.WARNING("=== FIN DEBUG ==="))    
+    """
+    ============================================================================
+    CAMBIO FIN: Métodos SOAP modificados para adaptarse a esta clase
+    ============================================================================
+    """
