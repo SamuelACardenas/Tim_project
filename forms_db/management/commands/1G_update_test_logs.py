@@ -983,7 +983,7 @@ class Command(BaseCommand):
             if created:
                 employee_name = employee.employeeName if employee else "Sistema"
                 self.stdout.write(self.style.SUCCESS(
-                    f'Nueva UUT creada: {log_info["sn"]} por {employee_name}"
+                    f'Nueva UUT creada: {log_info["sn"]} por {employee_name}'
                 ))
             
             return uut
