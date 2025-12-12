@@ -166,6 +166,7 @@ CELERY_TASK_DEFAULT_QUEUE = 'celery'
 CELERY_TASK_CREATE_MISSING_QUEUES = True
 CELERY_TASK_ROUTES = {
     'forms_db.tasks.update_test_logs_task': {'queue': 'celery'},
+    'forms_db.tasks.update_1G_logs_task': {'queue': 'logs_1G'},
 }
 CELERY_BEAT_SCHEDULER = 'celery.beat.PersistentScheduler'
 CELERY_BEAT_SCHEDULE_FILENAME = '/var/run/celery/celerybeat-schedule'
@@ -173,5 +174,9 @@ CELERY_BEAT_SCHEDULE = {
     'update-test-logs': {
         'task': 'forms_db.tasks.update_test_logs_task',
         'schedule': 300.0,
-    }
+    },
+    'update-1G-logs': { 
+        'task': 'forms_db.tasks.update_1G_logs_task',
+        'schedule': 600.0,  # cada 10 minutos
+    },
 }

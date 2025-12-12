@@ -28,3 +28,23 @@ def update_test_logs_task(self):
             'error': str(e),
             'time': str(datetime.now())
         }
+    
+
+@shared_task(bind=True)
+def update_1G_logs_task(self):
+    logger.info(f"Iniciando actualización 1G de logs a las {datetime.now()}")
+    try:
+        call_command('1G_update_test_logs')
+        logger.info("Actualización 1G de logs completada exitosamente")
+        return {'status': 'success', 
+                'time': str(datetime.now())
+        }
+    except Exception as e:
+        logger.error(f"Error en actualización 1G de logs: {str(e)}", exc_info=True)
+        # Reintentar después de 6 minutos si falla
+        self.retry(exc=e, countdown=360, max_retries=3)
+        return {
+            'status': 'error', 
+            'error': str(e), 
+            'time': str(datetime.now())
+        }

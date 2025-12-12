@@ -461,16 +461,18 @@ class Command(BaseCommand):
             # CAMBIO COMIENZO: Solo ahora mover el archivo después de procesamiento exitoso
             # ============================================================================
             """
+            """
             try:
                 sftp.mkdir('C:/LOG/TIM/processed')
             except:
                 pass  # El directorio ya existe
+            """
             
             # Mover el archivo remoto SOLO si todo fue exitoso
-            sftp.rename(remote_path, remote_backup_path)
+            sftp.remove(remote_path)
             
             self.stdout.write(self.style.SUCCESS(
-                f'Archivo movido a processed: {filename}'
+                f'Archivo movido al servidor: {filename}'
             ))
 
             """
