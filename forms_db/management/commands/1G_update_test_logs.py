@@ -29,14 +29,14 @@ class Command(BaseCommand):
         """
         
         estaciones_dict = [
-            #{"ip": "10.12.199.150", "nombre": "RUNIN 01", "usuario": "User"},
-            #{"ip": "10.12.199.155", "nombre": "RUNIN 02", "usuario": "user"},
-            #{"ip": "10.12.199.160", "nombre": "RUNIN 03", "usuario": "User"},
+            {"ip": "10.12.199.150", "nombre": "RUNIN 01", "usuario": "User"},
+            {"ip": "10.12.199.155", "nombre": "RUNIN 02", "usuario": "user"},
+            {"ip": "10.12.199.160", "nombre": "RUNIN 03", "usuario": "User"},
             {"ip": "10.12.199.165", "nombre": "RUNIN-04", "usuario": "user"},
-            #{"ip": "10.12.199.140", "nombre": "BFT 01", "usuario": "User.DESKTOP-T3G3HJ2"},
-            #{"ip": "10.12.199.145", "nombre": "BFT 02", "usuario": "User"},
-            #{"ip": "10.12.199.170", "nombre": "FCA 01", "usuario": "user"},
-            #{"ip": "10.12.199.175", "nombre": "FCA 02", "usuario": "user"},
+            {"ip": "10.12.199.140", "nombre": "BFT 01", "usuario": "User.DESKTOP-T3G3HJ2"},
+            {"ip": "10.12.199.145", "nombre": "BFT 02", "usuario": "User"},
+            {"ip": "10.12.199.170", "nombre": "FCA 01", "usuario": "user"},
+            {"ip": "10.12.199.175", "nombre": "FCA 02", "usuario": "user"},
         ]
         
         for estacion in estaciones_dict:
